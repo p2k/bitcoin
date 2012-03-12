@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_KEYSTORE_H
@@ -29,8 +29,6 @@ public:
     virtual bool HaveCScript(const uint160 &hash) const =0;
     virtual bool GetCScript(const uint160 &hash, CScript& redeemScriptOut) const =0;
 
-    // Generate a new key, and add it to the store
-    virtual std::vector<unsigned char> GenerateNewKey();
     virtual bool GetSecret(const CBitcoinAddress &address, CSecret& vchSecret, bool &fCompressed) const
     {
         CKey key;

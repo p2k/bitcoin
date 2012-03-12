@@ -1,5 +1,5 @@
 // Copyright (c) 2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 
@@ -120,6 +120,17 @@ Value ValueFromAmount(int64 amount)
     return (double)amount / (double)COIN;
 }
 
+std::string
+HexBits(unsigned int nBits)
+{
+    union {
+        int32_t nBits;
+        char cBits[4];
+    } uBits;
+    uBits.nBits = htonl((int32_t)nBits);
+    return HexStr(BEGIN(uBits.cBits), END(uBits.cBits));
+}
+
 void WalletTxToJSON(const CWalletTx& wtx, Object& entry)
 {
     int confirms = wtx.GetDepthInMainChain();
@@ -147,11 +158,13 @@ Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex)
 {
     Object result;
     result.push_back(Pair("hash", block.GetHash().GetHex()));
-    result.push_back(Pair("blockcount", blockindex->nHeight));
+    result.push_back(Pair("size", (int)::GetSerializeSize(block, SER_NETWORK)));
+    result.push_back(Pair("height", blockindex->nHeight));
     result.push_back(Pair("version", block.nVersion));
     result.push_back(Pair("merkleroot", block.hashMerkleRoot.GetHex()));
     result.push_back(Pair("time", (boost::int64_t)block.GetBlockTime()));
     result.push_back(Pair("nonce", (boost::uint64_t)block.nNonce));
+    result.push_back(Pair("bits", HexBits(block.nBits)));
     result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
     Array txhashes;
     BOOST_FOREACH (const CTransaction&tx, block.vtx)
@@ -159,9 +172,9 @@ Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex)
     result.push_back(Pair("tx", txhashes));
 
     if (blockindex->pprev)
-        result.push_back(Pair("hashprevious", blockindex->pprev->GetBlockHash().GetHex()));
+        result.push_back(Pair("previousblockhash", blockindex->pprev->GetBlockHash().GetHex()));
     if (blockindex->pnext)
-        result.push_back(Pair("hashnext", blockindex->pnext->GetBlockHash().GetHex()));
+        result.push_back(Pair("nextblockhash", blockindex->pnext->GetBlockHash().GetHex()));
     return result;
 }
 
@@ -288,7 +301,7 @@ Value getgenerate(const Array& params, bool fHelp)
             "getgenerate\n"
             "Returns true or false.");
 
-    return (bool)fGenerateBitcoins;
+    return GetBoolArg("-gen");
 }
 
 
@@ -307,13 +320,11 @@ Value setgenerate(const Array& params, bool fHelp)
     if (params.size() > 1)
     {
         int nGenProcLimit = params[1].get_int();
-        fLimitProcessors = (nGenProcLimit != -1);
-        WriteSetting("fLimitProcessors", fLimitProcessors);
-        if (nGenProcLimit != -1)
-            WriteSetting("nLimitProcessors", nLimitProcessors = nGenProcLimit);
+        mapArgs["-genproclimit"] = itostr(nGenProcLimit);
         if (nGenProcLimit == 0)
             fGenerate = false;
     }
+    mapArgs["-gen"] = (fGenerate ? "1" : "0");
 
     GenerateBitcoins(fGenerate, pwalletMain);
     return Value::null;
@@ -353,7 +364,7 @@ Value getinfo(const Array& params, bool fHelp)
     obj.push_back(Pair("keypoolsize",   pwalletMain->GetKeyPoolSize()));
     obj.push_back(Pair("paytxfee",      ValueFromAmount(nTransactionFee)));
     if (pwalletMain->IsCrypted())
-        obj.push_back(Pair("unlocked_until", (boost::int64_t)nWalletUnlockTime));
+        obj.push_back(Pair("unlocked_until", (boost::int64_t)nWalletUnlockTime / 1000));
     obj.push_back(Pair("errors",        GetWarnings("statusbar")));
     return obj;
 }
@@ -372,8 +383,8 @@ Value getmininginfo(const Array& params, bool fHelp)
     obj.push_back(Pair("currentblocktx",(uint64_t)nLastBlockTx));
     obj.push_back(Pair("difficulty",    (double)GetDifficulty()));
     obj.push_back(Pair("errors",        GetWarnings("statusbar")));
-    obj.push_back(Pair("generate",      (bool)fGenerateBitcoins));
-    obj.push_back(Pair("genproclimit",  (int)(fLimitProcessors ? nLimitProcessors : -1)));
+    obj.push_back(Pair("generate",      GetBoolArg("-gen")));
+    obj.push_back(Pair("genproclimit",  (int)GetArg("-genproclimit", -1)));
     obj.push_back(Pair("hashespersec",  gethashespersec(params, false)));
     obj.push_back(Pair("pooledtx",      (uint64_t)nPooledTx));
     obj.push_back(Pair("testnet",       fTestNet));
@@ -588,8 +599,6 @@ Value sendtoaddress(const Array& params, bool fHelp)
 
     return wtx.GetHash().GetHex();
 }
-
-static const string strMessageMagic = "Bitcoin Signed Message:\n";
 
 Value signmessage(const Array& params, bool fHelp)
 {
@@ -1025,9 +1034,12 @@ Value addmultisigaddress(const Array& params, bool fHelp)
             if (address.IsScript())
                 throw runtime_error(
                     strprintf("%s is a pay-to-script address",ks.c_str()));
-            if (!pwalletMain->GetKey(address, pubkeys[i]))
+            std::vector<unsigned char> vchPubKey;
+            if (!pwalletMain->GetPubKey(address, vchPubKey))
                 throw runtime_error(
                     strprintf("no full public key for address %s",ks.c_str()));
+            if (vchPubKey.empty() || !pubkeys[i].SetPubKey(vchPubKey))
+                throw runtime_error(" Invalid public key: "+ks);
         }
 
         // Case 2: hex public key
@@ -1536,37 +1548,43 @@ void ThreadTopUpKeyPool(void* parg)
 
 void ThreadCleanWalletPassphrase(void* parg)
 {
-    int64 nMyWakeTime = GetTime() + *((int*)parg);
+    int64 nMyWakeTime = GetTimeMillis() + *((int64*)parg) * 1000;
+
+    ENTER_CRITICAL_SECTION(cs_nWalletUnlockTime);
 
     if (nWalletUnlockTime == 0)
     {
-        CRITICAL_BLOCK(cs_nWalletUnlockTime)
+        nWalletUnlockTime = nMyWakeTime;
+
+        do
         {
-            nWalletUnlockTime = nMyWakeTime;
-        }
+            if (nWalletUnlockTime==0)
+                break;
+            int64 nToSleep = nWalletUnlockTime - GetTimeMillis();
+            if (nToSleep <= 0)
+                break;
 
-        while (GetTime() < nWalletUnlockTime)
-            Sleep(GetTime() - nWalletUnlockTime);
+            LEAVE_CRITICAL_SECTION(cs_nWalletUnlockTime);
+            Sleep(nToSleep);
+            ENTER_CRITICAL_SECTION(cs_nWalletUnlockTime);
 
-        CRITICAL_BLOCK(cs_nWalletUnlockTime)
+        } while(1);
+
+        if (nWalletUnlockTime)
         {
             nWalletUnlockTime = 0;
+            pwalletMain->Lock();
         }
     }
     else
     {
-        CRITICAL_BLOCK(cs_nWalletUnlockTime)
-        {
-            if (nWalletUnlockTime < nMyWakeTime)
-                nWalletUnlockTime = nMyWakeTime;
-        }
-        free(parg);
-        return;
+        if (nWalletUnlockTime < nMyWakeTime)
+            nWalletUnlockTime = nMyWakeTime;
     }
 
-    pwalletMain->Lock();
+    LEAVE_CRITICAL_SECTION(cs_nWalletUnlockTime);
 
-    delete (int*)parg;
+    delete (int64*)parg;
 }
 
 Value walletpassphrase(const Array& params, bool fHelp)
@@ -1601,7 +1619,7 @@ Value walletpassphrase(const Array& params, bool fHelp)
             "Stores the wallet decryption key in memory for <timeout> seconds.");
 
     CreateThread(ThreadTopUpKeyPool, NULL);
-    int* pnSleepTime = new int(params[1].get_int());
+    int64* pnSleepTime = new int64(params[1].get_int64());
     CreateThread(ThreadCleanWalletPassphrase, pnSleepTime);
 
     return Value::null;
@@ -1654,9 +1672,9 @@ Value walletlock(const Array& params, bool fHelp)
     if (!pwalletMain->IsCrypted())
         throw JSONRPCError(-15, "Error: running with an unencrypted wallet, but walletlock was called.");
 
-    pwalletMain->Lock();
     CRITICAL_BLOCK(cs_nWalletUnlockTime)
     {
+        pwalletMain->Lock();
         nWalletUnlockTime = 0;
     }
 
@@ -1809,7 +1827,7 @@ Value getwork(const Array& params, bool fHelp)
         }
 
         // Update nTime
-        pblock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+        pblock->UpdateTime(pindexPrev);
         pblock->nNonce = 0;
 
         // Update nExtraNonce
@@ -1909,7 +1927,7 @@ Value getmemorypool(const Array& params, bool fHelp)
         }
 
         // Update nTime
-        pblock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+        pblock->UpdateTime(pindexPrev);
         pblock->nNonce = 0;
 
         Array transactions;
@@ -1932,13 +1950,7 @@ Value getmemorypool(const Array& params, bool fHelp)
         result.push_back(Pair("time", (int64_t)pblock->nTime));
         result.push_back(Pair("mintime", (int64_t)pindexPrev->GetMedianTimePast()+1));
         result.push_back(Pair("curtime", (int64_t)GetAdjustedTime()));
-
-        union {
-            int32_t nBits;
-            char cBits[4];
-        } uBits;
-        uBits.nBits = htonl((int32_t)pblock->nBits);
-        result.push_back(Pair("bits", HexStr(BEGIN(uBits.cBits), END(uBits.cBits))));
+        result.push_back(Pair("bits", HexBits(pblock->nBits)));
 
         return result;
     }
@@ -2348,15 +2360,15 @@ void ThreadRPCServer(void* parg)
     IMPLEMENT_RANDOMIZE_STACK(ThreadRPCServer(parg));
     try
     {
-        vnThreadsRunning[4]++;
+        vnThreadsRunning[THREAD_RPCSERVER]++;
         ThreadRPCServer2(parg);
-        vnThreadsRunning[4]--;
+        vnThreadsRunning[THREAD_RPCSERVER]--;
     }
     catch (std::exception& e) {
-        vnThreadsRunning[4]--;
+        vnThreadsRunning[THREAD_RPCSERVER]--;
         PrintException(&e, "ThreadRPCServer()");
     } catch (...) {
-        vnThreadsRunning[4]--;
+        vnThreadsRunning[THREAD_RPCSERVER]--;
         PrintException(NULL, "ThreadRPCServer()");
     }
     printf("ThreadRPCServer exiting\n");
@@ -2367,18 +2379,25 @@ void ThreadRPCServer2(void* parg)
     printf("ThreadRPCServer started\n");
 
     strRPCUserColonPass = mapArgs["-rpcuser"] + ":" + mapArgs["-rpcpassword"];
-    if (strRPCUserColonPass == ":")
+    if (mapArgs["-rpcpassword"] == "")
     {
+        unsigned char rand_pwd[32];
+        RAND_bytes(rand_pwd, 32);
         string strWhatAmI = "To use bitcoind";
         if (mapArgs.count("-server"))
             strWhatAmI = strprintf(_("To use the %s option"), "\"-server\"");
         else if (mapArgs.count("-daemon"))
             strWhatAmI = strprintf(_("To use the %s option"), "\"-daemon\"");
         PrintConsole(
-            _("Error: %s, you must set rpcpassword=<password>\nin the configuration file: %s\n"
+            _("Error: %s, you must set a rpcpassword in the configuration file:\n %s\n"
+              "It is recommended you use the following random password:\n"
+              "rpcuser=bitcoinrpc\n"
+              "rpcpassword=%s\n"
+              "(you do not need to remember this password)\n"
               "If the file does not exist, create it with owner-readable-only file permissions.\n"),
                 strWhatAmI.c_str(),
-                GetConfigFile().c_str());
+                GetConfigFile().c_str(),
+                EncodeBase58(&rand_pwd[0],&rand_pwd[0]+32).c_str());
 #ifndef QT_GUI
         CreateThread(Shutdown, NULL);
 #endif
@@ -2429,7 +2448,7 @@ void ThreadRPCServer2(void* parg)
 #endif
 
         ip::tcp::endpoint peer;
-        vnThreadsRunning[4]--;
+        vnThreadsRunning[THREAD_RPCSERVER]--;
 #ifdef USE_SSL
         acceptor.accept(sslStream.lowest_layer(), peer);
 #else
@@ -2467,12 +2486,14 @@ void ThreadRPCServer2(void* parg)
         }
         if (!HTTPAuthorized(mapHeaders))
         {
-            // Deter brute-forcing short passwords
-            if (mapArgs["-rpcpassword"].size() < 15)
-                Sleep(50);
+            printf("ThreadRPCServer incorrect password attempt from %s\n",peer.address().to_string().c_str());
+            /* Deter brute-forcing short passwords.
+               If this results in a DOS the user really
+               shouldn't have their RPC port exposed.*/
+            if (mapArgs["-rpcpassword"].size() < 20)
+                Sleep(250);
 
             stream << HTTPReply(401, "") << std::flush;
-            printf("ThreadRPCServer incorrect password attempt\n");
             continue;
         }
 

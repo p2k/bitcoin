@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_UTIL_H
@@ -88,7 +88,9 @@ T* alignup(T* p)
 #define Beep(n1,n2)         (0)
 inline void Sleep(int64 n)
 {
-    boost::thread::sleep(boost::get_system_time() + boost::posix_time::milliseconds(n));
+    /*Boost has a year 2038 problem— if the request sleep time is past epoch+2^31 seconds the sleep returns instantly.
+      So we clamp our sleeps here to 10 years and hope that boost is fixed by 2028.*/
+    boost::thread::sleep(boost::get_system_time() + boost::posix_time::milliseconds(n>315576000000LL?315576000000LL:n));
 }
 #endif
 
@@ -143,7 +145,7 @@ std::vector<unsigned char> DecodeBase64(const char* p, bool* pfInvalid = NULL);
 std::string DecodeBase64(const std::string& str);
 std::string EncodeBase64(const unsigned char* pch, size_t len);
 std::string EncodeBase64(const std::string& str);
-void ParseParameters(int argc, char* argv[]);
+void ParseParameters(int argc, const char*const argv[]);
 bool WildcardMatch(const char* psz, const char* mask);
 bool WildcardMatch(const std::string& str, const std::string& mask);
 int GetFilesize(FILE* file);
@@ -151,7 +153,7 @@ void GetDataDir(char* pszDirRet);
 std::string GetConfigFile();
 std::string GetPidFile();
 void CreatePidFile(std::string pidFile, pid_t pid);
-void ReadConfigFile(std::map<std::string, std::string>& mapSettingsRet, std::map<std::string, std::vector<std::string> >& mapMultiSettingsRet);
+bool ReadConfigFile(std::map<std::string, std::string>& mapSettingsRet, std::map<std::string, std::vector<std::string> >& mapMultiSettingsRet);
 #ifdef WIN32
 std::string MyGetSpecialFolderPath(int nFolder, bool fCreate);
 #endif
@@ -217,6 +219,12 @@ public:
 
 #define CRITICAL_BLOCK(cs)     \
     if (CCriticalBlock criticalblock = CCriticalBlock(cs, #cs, __FILE__, __LINE__))
+
+#define ENTER_CRITICAL_SECTION(cs) \
+    (cs).Enter(#cs, __FILE__, __LINE__)
+
+#define LEAVE_CRITICAL_SECTION(cs) \
+    (cs).Leave()
 
 class CTryCriticalBlock
 {
@@ -401,30 +409,32 @@ inline bool IsSwitchChar(char c)
 #endif
 }
 
-inline std::string GetArg(const std::string& strArg, const std::string& strDefault)
-{
-    if (mapArgs.count(strArg))
-        return mapArgs[strArg];
-    return strDefault;
-}
+/**
+ * Return string argument or default value
+ *
+ * @param strArg Argument to get (e.g. "-foo")
+ * @param default (e.g. "1")
+ * @return command-line argument or default value
+ */
+std::string GetArg(const std::string& strArg, const std::string& strDefault);
 
-inline int64 GetArg(const std::string& strArg, int64 nDefault)
-{
-    if (mapArgs.count(strArg))
-        return atoi64(mapArgs[strArg]);
-    return nDefault;
-}
+/**
+ * Return integer argument or default value
+ *
+ * @param strArg Argument to get (e.g. "-foo")
+ * @param default (e.g. 1)
+ * @return command-line argument (0 if invalid number) or default value
+ */
+int64 GetArg(const std::string& strArg, int64 nDefault);
 
-inline bool GetBoolArg(const std::string& strArg, bool fDefault=false)
-{
-    if (mapArgs.count(strArg))
-    {
-        if (mapArgs[strArg].empty())
-            return true;
-        return (atoi(mapArgs[strArg]) != 0);
-    }
-    return fDefault;
-}
+/**
+ * Return boolean argument or default value
+ *
+ * @param strArg Argument to get (e.g. "-foo")
+ * @param default (true or false)
+ * @return command-line argument or default value
+ */
+bool GetBoolArg(const std::string& strArg, bool fDefault=false);
 
 /**
  * Set an argument if it doesn't already have a value
@@ -442,7 +452,7 @@ bool SoftSetArg(const std::string& strArg, const std::string& strValue);
  * @param fValue Value (e.g. false)
  * @return true if argument gets set, false if it already had a value
  */
-bool SoftSetArg(const std::string& strArg, bool fValue);
+bool SoftSetBoolArg(const std::string& strArg, bool fValue);
 
 
 

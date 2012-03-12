@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_MAIN_H
@@ -26,13 +26,14 @@ class CInv;
 class CRequestTracker;
 class CNode;
 
-static const int CLIENT_VERSION = 59900;
+static const int CLIENT_VERSION = 60000;
 static const bool VERSION_IS_BETA = true;
 extern const std::string CLIENT_NAME;
 
 static const unsigned int MAX_BLOCK_SIZE = 1000000;
 static const unsigned int MAX_BLOCK_SIZE_GEN = MAX_BLOCK_SIZE/2;
 static const int MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+static const int MAX_ORPHAN_TRANSACTIONS = MAX_BLOCK_SIZE/100;
 static const int64 COIN = 100000000;
 static const int64 CENT = 1000000;
 static const int64 MIN_TX_FEE = 50000;
@@ -49,10 +50,7 @@ static const int fHaveUPnP = false;
 #endif
 
 
-// Put "/P2SH/" in the coinbase so everybody can tell when
-// a majority of miners support it
-static const char* pszP2SH = "/P2SH/";
-static const CScript COINBASE_FLAGS = CScript() << std::vector<unsigned char>(pszP2SH, pszP2SH+strlen(pszP2SH));
+extern CScript COINBASE_FLAGS;
 
 
 
@@ -72,6 +70,7 @@ extern uint64 nPooledTx;
 extern unsigned int nTransactionsUpdated;
 extern uint64 nLastBlockTx;
 extern uint64 nLastBlockSize;
+extern const std::string strMessageMagic;
 extern double dHashesPerSec;
 extern int64 nHPSTimerStart;
 extern int64 nTimeBestReceived;
@@ -79,13 +78,7 @@ extern CCriticalSection cs_setpwalletRegistered;
 extern std::set<CWallet*> setpwalletRegistered;
 
 // Settings
-extern int fGenerateBitcoins;
 extern int64 nTransactionFee;
-extern int fLimitProcessors;
-extern int nLimitProcessors;
-extern int fMinimizeToTray;
-extern int fMinimizeOnClose;
-extern int fUseUPnP;
 
 
 
@@ -128,20 +121,6 @@ std::string GetWarnings(std::string strFor);
 
 
 bool GetWalletFile(CWallet* pwallet, std::string &strWalletFileOut);
-
-template<typename T>
-bool WriteSetting(const std::string& strKey, const T& value)
-{
-    bool fOk = false;
-    BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
-    {
-        std::string strWalletFile;
-        if (!GetWalletFile(pwallet, strWalletFile))
-            continue;
-        fOk |= CWalletDB(strWalletFile).WriteSetting(strKey, value);
-    }
-    return fOk;
-}
 
 
 class CDiskTxPos
@@ -528,14 +507,13 @@ public:
     */
     int GetLegacySigOpCount() const;
 
-    /** Count ECDSA signature operations the new (0.6-and-later) way
-        This is a better measure of how expensive it is to process this transaction.
+    /** Count ECDSA signature operations in pay-to-script-hash inputs.
 
         @param[in] mapInputs	Map of previous transactions that have outputs we're spending
         @return maximum number of sigops required to validate this transaction's inputs
         @see CTransaction::FetchInputs
      */
-    int GetSigOpCount(const MapPrevTx& mapInputs) const;
+    int GetP2SHSigOpCount(const MapPrevTx& mapInputs) const;
 
     /** Amount of bitcoins spent by this transaction.
         @return sum of all outputs (note: does not include fees)
@@ -684,10 +662,11 @@ public:
      @param[in] fBlock	True if being called to add a new best-block to the chain
      @param[in] fMiner	True if being called by CreateNewBlock
      @param[out] inputsRet	Pointers to this transaction's inputs
+     @param[out] fInvalid	returns true if transaction is invalid
      @return	Returns true if all inputs are in txdb or mapTestPool
      */
     bool FetchInputs(CTxDB& txdb, const std::map<uint256, CTxIndex>& mapTestPool,
-                     bool fBlock, bool fMiner, MapPrevTx& inputsRet);
+                     bool fBlock, bool fMiner, MapPrevTx& inputsRet, bool& fInvalid);
 
     /** Sanity check previous transactions, then, if all checks succeed,
         mark them as spent by this transaction.
@@ -698,11 +677,12 @@ public:
         @param[in] pindexBlock
         @param[in] fBlock	true if called from ConnectBlock
         @param[in] fMiner	true if called from CreateNewBlock
+        @param[in] fStrictPayToScriptHash	true if fully validating p2sh transactions
         @return Returns true if all checks succeed
      */
     bool ConnectInputs(MapPrevTx inputs,
                        std::map<uint256, CTxIndex>& mapTestPool, const CDiskTxPos& posThisTx,
-                       const CBlockIndex* pindexBlock, bool fBlock, bool fMiner);
+                       const CBlockIndex* pindexBlock, bool fBlock, bool fMiner, bool fStrictPayToScriptHash=true);
     bool ClientConnectInputs();
     bool CheckTransaction() const;
     bool AcceptToMemoryPool(CTxDB& txdb, bool fCheckInputs=true, bool* pfMissingInputs=NULL);
@@ -914,6 +894,7 @@ public:
         return (int64)nTime;
     }
 
+    void UpdateTime(const CBlockIndex* pindexPrev);
 
 
     uint256 BuildMerkleTree() const

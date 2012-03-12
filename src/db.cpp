@@ -1,11 +1,12 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 
 #include "headers.h"
 #include "db.h"
 #include "net.h"
+#include <boost/version.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 
@@ -767,13 +768,6 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
     vector<uint256> vWalletUpgrade;
     bool fIsEncrypted = false;
 
-    // Modify defaults
-#ifndef WIN32
-    // Tray icon sometimes disappears on 9.10 karmic koala 64-bit, leaving no way to access the program
-    fMinimizeToTray = false;
-    fMinimizeOnClose = false;
-#endif
-
     //// todo: shouldn't we catch exceptions and try to recover and continue?
     CRITICAL_BLOCK(pwallet->cs_wallet)
     {
@@ -862,6 +856,8 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                     ssValue >> pkey;
                     key.SetPubKey(vchPubKey);
                     key.SetPrivKey(pkey);
+                    if (key.GetPubKey() != vchPubKey || !key.IsValid())
+                        return DB_CORRUPT;
                 }
                 else
                 {
@@ -869,6 +865,8 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                     ssValue >> wkey;
                     key.SetPubKey(vchPubKey);
                     key.SetPrivKey(wkey.vchPrivKey);
+                    if (key.GetPubKey() != vchPubKey || !key.IsValid())
+                        return DB_CORRUPT;
                 }
                 if (!pwallet->LoadKey(key))
                     return DB_CORRUPT;
@@ -911,30 +909,13 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                 if (nFileVersion == 10300)
                     nFileVersion = 300;
             }
-            else if (strType == "setting")
-            {
-                string strKey;
-                ssKey >> strKey;
-
-                // Options
-#ifndef QT_GUI
-                if (strKey == "fGenerateBitcoins")  ssValue >> fGenerateBitcoins;
-#endif
-                if (strKey == "nTransactionFee")    ssValue >> nTransactionFee;
-                if (strKey == "fLimitProcessors")   ssValue >> fLimitProcessors;
-                if (strKey == "nLimitProcessors")   ssValue >> nLimitProcessors;
-                if (strKey == "fMinimizeToTray")    ssValue >> fMinimizeToTray;
-                if (strKey == "fMinimizeOnClose")   ssValue >> fMinimizeOnClose;
-                if (strKey == "fUseProxy")          ssValue >> fUseProxy;
-                if (strKey == "addrProxy")          ssValue >> addrProxy;
-                if (fHaveUPnP && strKey == "fUseUPnP")           ssValue >> fUseUPnP;
-            }
             else if (strType == "minversion")
             {
                 int nMinVersion = 0;
                 ssValue >> nMinVersion;
                 if (nMinVersion > CLIENT_VERSION)
                     return DB_TOO_NEW;
+                pwallet->LoadMinVersion(nMinVersion);
             }
             else if (strType == "cscript")
             {
@@ -953,14 +934,6 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
         WriteTx(hash, pwallet->mapWallet[hash]);
 
     printf("nFileVersion = %d\n", nFileVersion);
-    printf("fGenerateBitcoins = %d\n", fGenerateBitcoins);
-    printf("nTransactionFee = %"PRI64d"\n", nTransactionFee);
-    printf("fMinimizeToTray = %d\n", fMinimizeToTray);
-    printf("fMinimizeOnClose = %d\n", fMinimizeOnClose);
-    printf("fUseProxy = %d\n", fUseProxy);
-    printf("addrProxy = %s\n", addrProxy.ToString().c_str());
-    if (fHaveUPnP)
-        printf("fUseUPnP = %d\n", fUseUPnP);
 
 
     // Rewrite encrypted wallets of versions 0.4.0 and 0.5.0rc:
@@ -986,7 +959,7 @@ void ThreadFlushWalletDB(void* parg)
     if (fOneThread)
         return;
     fOneThread = true;
-    if (mapArgs.count("-noflushwallet"))
+    if (!GetBoolArg("-flushwallet", true))
         return;
 
     unsigned int nLastSeen = nWalletDBUpdated;
@@ -1060,14 +1033,19 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 filesystem::path pathDest(strDest);
                 if (filesystem::is_directory(pathDest))
                     pathDest = pathDest / wallet.strWalletFile;
-#if BOOST_VERSION >= 104000
-                filesystem::copy_file(pathSrc, pathDest, filesystem::copy_option::overwrite_if_exists);
-#else
-                filesystem::copy_file(pathSrc, pathDest);
-#endif
-                printf("copied wallet.dat to %s\n", pathDest.string().c_str());
 
-                return true;
+                try {
+#if BOOST_VERSION >= 104000
+                    filesystem::copy_file(pathSrc, pathDest, filesystem::copy_option::overwrite_if_exists);
+#else
+                    filesystem::copy_file(pathSrc, pathDest);
+#endif
+                    printf("copied wallet.dat to %s\n", pathDest.string().c_str());
+                    return true;
+                } catch(const filesystem::filesystem_error &e) {
+                    printf("error copying wallet.dat to %s - %s\n", pathDest.string().c_str(), e.what());
+                    return false;
+                }
             }
         }
         Sleep(100);

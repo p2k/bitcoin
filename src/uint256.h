@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_UINT256_H
@@ -89,13 +89,6 @@ public:
     {
         pn[0] ^= (unsigned int)b;
         pn[1] ^= (unsigned int)(b >> 32);
-        return *this;
-    }
-
-    base_uint& operator&=(uint64 b)
-    {
-        pn[0] &= (unsigned int)b;
-        pn[1] &= (unsigned int)(b >> 32);
         return *this;
     }
 
